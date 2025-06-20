@@ -14,7 +14,7 @@ import os
 import pandas as pd
 import numpy as np
 import seaborn as sns
-import keras
+import torch
 import time
 import warnings
 
@@ -42,6 +42,7 @@ from visualisation import pca_score_plot, cluster_heatmap_mumc
 from visualisation import plot_missingness_pattern, plot_stability
 from imputation import impute_data
 from xvae import load_xvae_model
+from pytorch_dec import load_dec_model, save_dec_model
 
 # Set default plot setting
 sns.set(rc={'figure.figsize':(11.7,8.27)},
@@ -97,8 +98,10 @@ if load_previous_results:
     y_pred_stab_sics_orig = pd.read_csv(f"{datafolder}sics_orig/y_pred_stab_sics"\
                                         "_orig.csv", index_col = 0)
 
-    model_sics_orig = keras.models.load_model(f"{datafolder}sics_orig/model_sics_orig")
-    encoder_sics_orig = keras.models.load_model(f"{datafolder}sics_orig/encoder_sics_orig")
+    model_sics_orig, dec_layer_sics_orig = load_dec_model(
+        f"{datafolder}sics_orig/model_sics_orig.pt"
+    )
+    encoder_sics_orig = model_sics_orig.encoder
 
 
     #X-DEC model
@@ -115,7 +118,7 @@ if load_previous_results:
                                       "centroids_sics_xvae.csv", index_col= 0)
     y_pred_stab_sics_xvae = pd.read_csv(f"{datafolder}sics_xvae/y_pred_stab_sics_xvae.csv",
                                         index_col = 0)
-    model_sics_xvae = keras.models.load_model(f"{datafolder}sics_xvae/model_sics_xvae")
+    model_sics_xvae = load_xvae_model(f"{datafolder}sics_xvae/model_sics_xvae")
     encoder_sics_xvae = load_xvae_model(f"{datafolder}sics_xvae/encoder_sics_xvae2")
         
 
@@ -261,9 +264,11 @@ t_orig = time.time()
 centroids_sics_orig, y_pred_stab_sics_orig, model_sics_orig,
  encoder_sics_orig) = compute_cluster_stability(x, n_cluster = 6,
      k = k, rep = rep, mapper = "jaccard", majority_vote=True, save = save_file,
-     return_extra = True,
-     save_name=f"Orginal_SICS_model_clustering_stabiltity_k{k}_rep_{rep}")
+    return_extra = True,
+    save_name=f"Orginal_SICS_model_clustering_stabiltity_k{k}_rep_{rep}")
 t_orig = time.time() - t_orig
+dec_layer_sics_orig = model_sics_orig[1]
+model_sics_orig = model_sics_orig[0]
 
 # Compute Jaccard cluster stability
 y_pred_stab_sics_orig, cluster_stab_sics_orig = jaccard_similarity(
@@ -280,8 +285,11 @@ plot_stability(sample_sics_orig, stability_type = "sample", save = save_file,
                savename = "Sample stability - majority vote - original SICS model")
 
 # Apply model to MUMC+ data
-y_pred_mumc_orig = model_sics_orig.predict(x_mumc).argmax(1)
-Z_mumc_orig = encoder_sics_orig.predict(x_mumc)
+with torch.no_grad():
+    x_mumc_t = torch.tensor(x_mumc, dtype=torch.float32)
+    z_mumc = encoder_sics_orig(x_mumc_t)
+    y_pred_mumc_orig = dec_layer_sics_orig(z_mumc).argmax(1).cpu().numpy()
+    Z_mumc_orig = z_mumc.cpu().numpy()
 
 # Visualise phenotype heatmaps
 df_viz_sics_orig = descriptives.copy().reset_index(drop=True)
@@ -348,8 +356,11 @@ if save_file:
     pd.DataFrame(centroids_sics_orig).to_csv(f"{datafolder}sics_orig/"\
                                              "centroids_sics_orig.csv")
     y_pred_stab_sics_orig.to_csv(f"{datafolder}sics_orig/y_pred_stab_sics_orig.csv")
-    model_sics_orig.save(f"{datafolder}sics_orig/model_sics_orig")
-    encoder_sics_orig.save(f"{datafolder}sics_orig/encoder_sics_orig")
+    save_dec_model(
+        model_sics_orig,
+        dec_layer_sics_orig,
+        f"{datafolder}sics_orig/model_sics_orig.pt",
+    )
 
 
 # %% Tune X-DEC
@@ -462,7 +473,7 @@ if save_file:
     pd.DataFrame(centroids).to_csv(f"{datafolder}SICS_xvae_tuned/"\
                                              "centroids_SICS_xvae_tuned.csv")
     y_pred.to_csv(f"{datafolder}SICS_xvae_tuned/y_pred_stab_SICS_xvae_tuned.csv")
-    model.save(f"{datafolder}SICS_xvae_tuned/model_SICS_xvae_tuned")
+    model.save_model(f"{datafolder}SICS_xvae_tuned/model_SICS_xvae_tuned")
     encoder.save_model(f"{datafolder}SICS_xvae_tuned/encoder_sics_xvae_tuned")
 
 # %% Validate X-DEC model
@@ -538,9 +549,11 @@ cluster_pca(Z_sics_xvae, y_pred_sics_xvae+1, plot_3D = False, multi_plot = False
 # Apply model on MUMC+ data
 x_cat_mumc = np.array(df_mumc[cat_features])
 x_num_mumc = np.array(df_mumc[num_features])
-feature_array_mumc = [x_num_mumc, x_cat_mumc]
-y_pred_mumc_xvae = model_sics_xvae.predict(feature_array_mumc).argmax(1)
-Z_mumc_xvae = encoder_sics_xvae.predict(x_num_mumc, x_cat_mumc)
+with torch.no_grad():
+    Z_mumc_xvae = model_sics_xvae.predict(x_num_mumc, x_cat_mumc)
+    cent = centroids_sics_xvae.values if hasattr(centroids_sics_xvae, "values") else centroids_sics_xvae
+    dists = np.linalg.norm(Z_mumc_xvae[:, None, :] - cent, axis=2)
+    y_pred_mumc_xvae = dists.argmin(axis=1)
 
 # Visualise phenotype heatmaps
 df_viz_sics_xvae = descriptives.copy().reset_index(drop=True)
@@ -597,7 +610,7 @@ if save_file:
     pd.DataFrame(centroids_sics_xvae).to_csv(f"{datafolder}sics_xvae/"\
                                              "centroids_sics_xvae.csv")
     y_pred_stab_sics_xvae.to_csv(f"{datafolder}sics_xvae/y_pred_stab_sics_xvae.csv")
-    model_sics_xvae.save(f"{datafolder}sics_xvae/model_sics_xvae")
+    model_sics_xvae.save_model(f"{datafolder}sics_xvae/model_sics_xvae")
     encoder_sics_xvae.save_model(f"{datafolder}sics_xvae/encoder_sics_xvae")
 
 
@@ -688,8 +701,11 @@ if save_file:
     pd.DataFrame(centroids_dec).to_csv(f"{datafolder}SICS_dec_tuned/"\
                                              "centroids_SICS_dec_tuned.csv")
     y_pred_stab_dec.to_csv(f"{datafolder}SICS_dec_tuned/y_pred_stab_SICS_dec_tuned.csv")
-    model_dec.save(f"{datafolder}SICS_dec_tuned/model_SICS_dec_tuned")
-    encoder_dec.save(f"{datafolder}SICS_dec_tuned/encoder_sics_dec_tuned")
+    save_dec_model(
+        model_dec[0],
+        model_dec[1],
+        f"{datafolder}SICS_dec_tuned/model_SICS_dec_tuned.pt",
+    )
 
 
 # %% Validate recreated SICS model with optimised hyper parameter values
@@ -713,9 +729,11 @@ centroids_sics_orig_tuned , y_pred_stab_sics_orig_tuned , model_sics_orig_tuned 
  encoder_sics_orig_tuned ) = compute_cluster_stability(x, n_cluster = 6,
      k = k, rep = rep, mapper = "jaccard", majority_vote=True, save = save_file,
      neurons_e = e_tuned, neurons_h = h_tuned,
-     return_extra = True,
-     save_name=f"Orginal_SICS_model_tuned _clustering_stabiltity_k{k}_rep_{rep}")
+    return_extra = True,
+    save_name=f"Orginal_SICS_model_tuned _clustering_stabiltity_k{k}_rep_{rep}")
 t_orig_tuned = time.time() - t_orig_tuned
+dec_layer_sics_orig_tuned = model_sics_orig_tuned[1]
+model_sics_orig_tuned = model_sics_orig_tuned[0]
 
 # Compute Jaccard cluster stability
 y_pred_stab_sics_orig_tuned , cluster_stab_sics_orig_tuned  = jaccard_similarity(
@@ -732,8 +750,11 @@ plot_stability(sample_sics_orig_tuned, stability_type = "sample", save = save_fi
                savename = "Sample stability - majority vote - original SICS model tuned")
 
 # Apply model to MUMC+ data
-y_pred_mumc_orig_tuned  = model_sics_orig_tuned .predict(x_mumc).argmax(1)
-Z_mumc_orig_tuned  = encoder_sics_orig_tuned .predict(x_mumc)
+with torch.no_grad():
+    x_mumc_tuned_t = torch.tensor(x_mumc, dtype=torch.float32)
+    z_mumc_tuned = encoder_sics_orig_tuned(x_mumc_tuned_t)
+    y_pred_mumc_orig_tuned = dec_layer_sics_orig_tuned(z_mumc_tuned).argmax(1).cpu().numpy()
+    Z_mumc_orig_tuned = z_mumc_tuned.cpu().numpy()
 
 # Visualise phenotype heatmaps
 df_viz_sics_orig_tuned  = descriptives.copy().reset_index(drop=True)
@@ -804,5 +825,9 @@ if save_file:
     pd.DataFrame(centroids_sics_orig_tuned).to_csv(f"{datafolder}SICS_dec/"\
                                              "centroids_sics_orig_tuned.csv")
     y_pred_stab_sics_orig_tuned.to_csv(f"{datafolder}SICS_dec/y_pred_stab_sics_orig_tuned.csv")
-    model_sics_orig_tuned.save(f"{datafolder}SICS_dec/model_sics_orig_tuned")
-    encoder_sics_orig_tuned.save(f"{datafolder}SICS_dec/encoder_sics_orig_tuned")
+    save_dec_model(
+        model_sics_orig_tuned,
+        dec_layer_sics_orig_tuned,
+        f"{datafolder}SICS_dec/model_sics_orig_tuned.pt",
+    )
+
