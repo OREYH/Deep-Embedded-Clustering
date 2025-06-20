@@ -1,6 +1,7 @@
 # Deep Embedded Clustering generalisability and adaptation for mixed data types
 This code was used for a scientific publication where we recreated a Deep Embedded Clustering model on a populations of ICU patients. We tested the model's generalisability onto a population of ICU patients from another hospital. We Also created the X-DEC model adaptation, which uses an XVAE to integrate mixed datatypes, and tested its generalisability as well.
 
+A minimal PyTorch implementation of DEC is available in `scripts/pytorch_dec.py`. This requires PyTorch 2.x or newer.
 ## Guide to using the code
 See the diagram below for some guidance on how to use and set-up the code to work on your computer.
 

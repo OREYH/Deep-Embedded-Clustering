@@ -8,19 +8,15 @@ This file contains custom functions for the clustering functionality.
 """
 # import packages
 import numpy as np
-import tensorflow as tf
+import torch
 
 # Set random seed for reproducibility
 np.random.seed(5192)
-tf.random.set_seed(5192)
+torch.manual_seed(5192)
 
 # import packages
 import pandas as pd
-from keras import regularizers
-from keras.layers import Dense
-from keras.layers import Input
-from keras.models import Model
-from tensorflow.keras.optimizers import SGD
+from torch.optim import SGD
 from sklearn.cluster import KMeans
 from sklearn.model_selection import RepeatedKFold
 from metrics import calculate_metrics
@@ -36,8 +32,8 @@ import seaborn as sns
 
 # import local functions
 from xvae import xvae, load_xvae_model
-from DECLayer import DECLayer
 from data_functions import scale_data
+from pytorch_dec import train_dec
 
 
 def target_distribution(q):
@@ -58,131 +54,47 @@ def target_distribution(q):
     weight = q ** 2 / q.sum(0)
     return (weight.T / weight.sum(1)).T
 
-def dec_cluster(encoder, feature_array, y, n_classes, seed=5192,
-                return_extra = False, tol = 0.01, n_init = 20):
-    '''
-    Runs the DEC algorithm to optimise an autoencoder for finding clusters.
-    
+def dec_cluster(feature_array, y, n_classes, seed=5192, return_extra=False, **kwargs):
+    """Run the DEC algorithm implemented in PyTorch.
+
     Parameters
     ----------
-    encoder : Keras object 
-        Encoder part of an auteoncoder.
     feature_array : ndarray
-        2-dimensional array where rows represent samples and columns are
-        the input variables for the clustering model.
-    y : ndarray
-        Array specifying the true labels. If not true labels are known, then
-        set to None.
-    n_classes : Integer
-        number of clusters to identify.
-    seed : integer, optional
-        Random seed. The default is 5192.
-    return_extra : Boolean, optional
-        Boolean indicating if extra information should be returned. The default
-        is False.
-    tol : float, optional,
-        Value indicating the threshold below 
+        2D array where rows represent samples and columns are the input variables.
+    y : ndarray or None
+        True labels, if available.
+    n_classes : int
+        Number of clusters to identify.
+    seed : int, optional
+        Random seed. Default is 5192.
+    return_extra : bool, optional
+        Whether to return additional variables.
+    **kwargs : dict
+        Additional arguments passed to :func:`train_dec`.
 
     Returns
     -------
     y_pred : ndarray
-        The cluster labels per sample.
+        Predicted cluster labels.
     q : ndarray
-        The soft labels.
+        Soft label distribution.
     centroids : ndarray, optional
-        The centroids of the clusters in the Z-space. Only returned if
-        return_extra=True.
-    model : Keras object
-        The autoencoder model.
+        Cluster centroids in latent space.
+    model : tuple, optional
+        The trained autoencoder and clustering layer.
+    """
 
-    '''
-    # Set random seed for reproducibility
     np.random.seed(seed)
-    tf.random.set_seed(seed)
-    
-    # Initialise the Deep Embedded Clustering Layer class object
-    clustering_layer = DECLayer(n_classes, name='clustering')(encoder.output)
-    # Add training and evaluation routines to the network
-    model = Model(inputs=encoder.input, outputs=clustering_layer)
-    # Configure optimisation parameters of the model
-    model.compile(optimizer=SGD(0.01, 0.9), loss='kld')
-    
-    # Initialise K-means clustering algorithm
-    kmeans = KMeans(n_clusters=n_classes, n_init=n_init)
-    # Fit K-means to the latent output of the autoencoder
-    y_pred = kmeans.fit_predict(encoder.predict(feature_array))
-    # Record current cluster label predictions
-    y_pred_last = np.copy(y_pred)
-    # Update the weights of the model to the current cluster centers
-    model.get_layer(name='clustering').set_weights([kmeans.cluster_centers_])
-    
-    # Define some parameters for the optimisation process.
-    loss = 0
-    index = 0
-    maxiter = 8000
-    batch_size = 256
-    update_interval = 140
-    index_array = np.arange(feature_array.shape[0])
+    torch.manual_seed(seed)
 
-    tol = tol  # tolerance threshold to stop training
+    pred, z, model, dec_layer = train_dec(feature_array, n_classes, **kwargs)
+    with torch.no_grad():
+        q = dec_layer(torch.tensor(z)).cpu().numpy()
+    centroids = dec_layer.clusters.detach().cpu().numpy()
 
-    for ite in range(int(maxiter)):
-        if ite % update_interval == 0:
-            # Generate soft labels for the samples
-            q = model.predict(feature_array, verbose=0)
-            # update the auxiliary target distribution p
-            p = target_distribution(q)
-
-            # evaluate the clustering performance if ground truth cluster
-            # labels are available
-            y_pred = q.argmax(1)
-            if y is not None:
-                acc, ari, loss, nmi = calculate_metrics(loss, y, y_pred)
-                print('Iter %d: acc = %.5f, nmi = %.5f, ari = %.5f' % 
-                      (ite,acc, nmi, ari), ' ; loss=', loss)
-            
-            # Compute how much percentage of the samples have changed
-            # predicted cluster label
-            delta_label = np.sum(y_pred != y_pred_last).astype(
-                np.float32) / y_pred.shape[0]
-            # Update current cluster label prediction
-            y_pred_last = np.copy(y_pred)
-            # check stop criterion - model convergence
-            if ite > 0 and delta_label < tol:
-                print('delta_label ', delta_label, '< tol ', tol)
-                print('performed ', ite, ' iterations.')
-                print('Reached tolerance threshold. Stopping training.')
-                break
-        
-        # Set indices of sample to use to update the model, these are selected
-        # step wise. batch_size indicates how many samples to select.
-        idx = index_array[index * batch_size: min((index + 1) * batch_size,
-                                                  feature_array.shape[0])]
-        # Perform one iteration of the SGD optimisation on the sample subset.
-        loss = model.train_on_batch(x=feature_array[idx], y=p[idx])
-        # Update index for the next sample subset
-        index = index + 1 if (index + 1) * batch_size <= feature_array.shape[0] else 0
-    
-    # Update the softlabels
-    q = model.predict(feature_array, verbose=0)
-    # update the auxiliary target distribution p (redundant)
-    p = target_distribution(q)
-
-    # evaluate the clustering performance if ground truth cluster
-    # labels are available
-    y_pred = q.argmax(1)
-    if y is not None:
-        acc, ari, loss, nmi = calculate_metrics(loss, y, y_pred)
-        print('Acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari),
-              ' ; loss=', loss)
-    
-    # Get the cluster centroids
-    centroids = model.get_layer(name='clustering').get_weights()[0]
-    
-    if(return_extra):
-        return y_pred, q, centroids, model
-    else:
-        return y_pred, q
+    if return_extra:
+        return pred, q, centroids, (model, dec_layer)
+    return pred, q
 
 def dec_vae_cluster(encoder, feature_array, y, n_classes, seed=5192,
                 return_extra = False, tol = 0.01, n_init = 20,
@@ -226,7 +138,7 @@ def dec_vae_cluster(encoder, feature_array, y, n_classes, seed=5192,
     '''
     # Set random seed for reproducibility
     np.random.seed(seed)
-    tf.random.set_seed(seed)
+    torch.manual_seed(seed)
     
     # Initialise the Deep Embedded Clustering Layer class object
     clustering_layer = DECLayer(n_classes, name='clustering')(encoder.output)
@@ -317,9 +229,8 @@ def dec_vae_cluster(encoder, feature_array, y, n_classes, seed=5192,
 
 def cluster_mlp_autoencoder(feature_array, n_classes, y=None, neurons_h=64,
                             neurons_e=8, epochs=500, batch_size=64, seed=5192,
-                            check_stability = False, stability_check_it = 100,
-                            order_by_size = False,
-                            return_extra = False, verbose = 0):
+                            check_stability=False, stability_check_it=100,
+                            order_by_size=False, return_extra=False, verbose=0):
     '''
     Train a Deep Embedded Clustering model
 
@@ -384,97 +295,50 @@ def cluster_mlp_autoencoder(feature_array, n_classes, y=None, neurons_h=64,
         the input variables. Only returned if return_extra=True.
     '''
     
-    # Set random seed for reproducibility
     np.random.seed(seed)
-    tf.random.set_seed(seed)    
-    
-    input_arr = Input(shape=(feature_array.shape[1],))
-    encoded = Dense(neurons_h, activation='relu',
-                    activity_regularizer=regularizers.l1(10e-5))(input_arr)
-    encoded = Dense(neurons_e, activation='relu')(encoded)
+    torch.manual_seed(seed)
 
-    decoded = Dense(neurons_h, activation='relu')(encoded)
-    # The final decoder layer, here you can change the activation function from
-    # sigmoid into tanh.
-    decoded = Dense(feature_array.shape[1], activation='sigmoid')(decoded)
-
-    autoencoder = Model(input_arr, decoded)
-    encoder = Model(input_arr, encoded)
-
-    autoencoder.compile(optimizer='adam', loss='mean_squared_error')
-
-    autoencoder.fit(feature_array, feature_array,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    shuffle=True,
-                    verbose = verbose)
-    
-    Z_orig = encoder.predict(feature_array)
-    
-    # Save a copy of the initial encoder
-    encoder_unoptimised = encoder
-    
-    # Run cluster analysis multiple time to test sability if requested
-    if(check_stability):
-        # Initialise y_pred and y_proba
-        y_pred = pd.DataFrame(index = range(feature_array.shape[0]),
+    if check_stability:
+        y_pred = pd.DataFrame(index=range(feature_array.shape[0]),
                               columns=range(stability_check_it))
         y_proba = np.full((feature_array.shape[0], n_classes), np.nan)
-        # Save weights of the autoencoder
-        encoder_weights = encoder.get_weights()
-        
-        # Run cluster analysis once to obtain initial centroids which will
-        # define the cluster labels
-        _, _, centroids, model = dec_cluster(encoder, feature_array, y, n_classes,
-                                      return_extra = True)
-        
-        # Compute latent feature space Z
-        Z = encoder.predict(feature_array)
-        
+
+        pred, q, centroids, extras = dec_cluster(
+            feature_array, y, n_classes, seed=seed, return_extra=True,
+            hidden_dim=neurons_h, latent_dim=neurons_e,
+            batch_size=batch_size, pretrain_epochs=epochs, dec_epochs=epochs)
+        model, dec_layer = extras
+        Z = model.encode(torch.tensor(feature_array, dtype=torch.float32)).detach().numpy()
+
         for i in range(stability_check_it):
-            # Reset encoder weights
-            encoder.set_weights(encoder_weights)
-            
-            # Run cluster analysis
-            y_pred_it, y_proba_it = dec_cluster(encoder,feature_array, y,
-                                                n_classes)
-            y_proba = np.nanmean(np.array([y_proba, y_proba_it]), axis=0)
-            
-            # Define cluster numbers based on distance to initial centroids
-            y_pred_it = map_cluster_to_centroid(Z, y_pred_it, centroids)
-            
-            # Store cluster prediction in y_pred
-            y_pred.iloc[:,i] = y_pred_it
-            print(f"completed stability iteration {i}/{stability_check_it}")
-        
-        # Compute cluster stability per sample
-        cluster_stab = sample_cluster_stability(y_pred)    
-        
+            pred_it, q_it, _, _ = dec_cluster(
+                feature_array, y, n_classes, seed=seed + i,
+                hidden_dim=neurons_h, latent_dim=neurons_e,
+                batch_size=batch_size, pretrain_epochs=epochs, dec_epochs=epochs)
+            y_proba = np.nanmean(np.array([y_proba, q_it]), axis=0)
+            y_pred.iloc[:, i] = pred_it
+
+        cluster_stab = sample_cluster_stability(y_pred)
+
         if return_extra:
-            return y_pred, y_proba, cluster_stab, Z, centroids, model, encoder, encoder_unoptimised
-        else:
-            return y_pred, y_proba, cluster_stab
-            
-    else:
-        # Run cluster analysis
-        y_pred, y_proba, centroids, model = dec_cluster(encoder, feature_array, y,
-                                                 n_classes,
-                                                 return_extra = True)
-        
-        # Define cluster numbers based on number of samples per cluster
-        if order_by_size:
-            y_pred = pd.Series(y_pred)
-            y_pred.replace(np.asarray(y_pred.value_counts().index),
-                            np.arange(1,n_classes+1),
-                            inplace = True)
-            
-        # Get latent feature space Z
-        Z = encoder.predict(feature_array)
-    
+            return y_pred, y_proba, cluster_stab, Z, centroids, (model, dec_layer), None
+        return y_pred, y_proba, cluster_stab
+
+    pred, q, centroids, extras = dec_cluster(
+        feature_array, y, n_classes, seed=seed, return_extra=True,
+        hidden_dim=neurons_h, latent_dim=neurons_e,
+        batch_size=batch_size, pretrain_epochs=epochs, dec_epochs=epochs)
+    model, dec_layer = extras
+    Z = model.encode(torch.tensor(feature_array, dtype=torch.float32)).detach().numpy()
+
+    if order_by_size:
+        pred = pd.Series(pred)
+        pred.replace(np.asarray(pred.value_counts().index),
+                     np.arange(1, n_classes + 1), inplace=True)
+
     if return_extra:
-        return y_pred, y_proba, Z, centroids, model, encoder, encoder_unoptimised
-    else:
-        return y_pred, y_proba
+        return pred, q, Z, centroids, (model, dec_layer), None, None
+    return pred, q
 
 
 def cluster_mlp_vae(feature_array, n_classes, y=None, ds1 = 52,ds2 = 5,
@@ -572,7 +436,7 @@ def cluster_mlp_vae(feature_array, n_classes, y=None, ds1 = 52,ds2 = 5,
    
     # Set random seed for reproducibility
     np.random.seed(seed)
-    tf.random.set_seed(seed) 
+    torch.manual_seed(seed)
 
     x_num = feature_array[0]
     x_cat = feature_array[1]
