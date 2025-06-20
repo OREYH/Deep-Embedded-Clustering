@@ -105,3 +105,35 @@ def train_dec(data: np.ndarray, n_clusters: int, hidden_dim: int = 64,
         q = dec_layer(z)
     final_pred = q.argmax(dim=1).cpu().numpy()
     return final_pred, z.cpu().numpy(), model, dec_layer
+
+
+def save_dec_model(model: AutoEncoder, dec_layer: DECLayer, path: str) -> None:
+    """Save a DEC autoencoder and clustering layer."""
+    torch.save(
+        {
+            "ae_state": model.state_dict(),
+            "dec_state": dec_layer.state_dict(),
+            "params": {
+                "input_dim": next(model.parameters()).shape[1],
+                "hidden_dim": model.encoder[0].out_features,
+                "latent_dim": model.encoder[-1].out_features,
+                "n_clusters": dec_layer.clusters.size(0),
+            },
+        },
+        path,
+    )
+
+
+def load_dec_model(path: str, device: str = "cpu"):
+    """Load a DEC model saved with ``save_dec_model``."""
+    chk = torch.load(path, map_location=device)
+    params = chk["params"]
+    model = AutoEncoder(
+        params["input_dim"], params["hidden_dim"], params["latent_dim"]
+    ).to(device)
+    dec_layer = DECLayer(params["n_clusters"], params["latent_dim"]).to(device)
+    model.load_state_dict(chk["ae_state"])
+    dec_layer.load_state_dict(chk["dec_state"])
+    model.eval()
+    dec_layer.eval()
+    return model, dec_layer
