@@ -118,7 +118,7 @@ def cluster_mlp_autoencoder(feature_array, n_classes, y=None, neurons_h=64,
 
     if return_extra:
         encoder = model.encoder
-        return preds, q, Z, centroids, model, encoder, encoder
+        return preds, q, Z, centroids, (model, dec_layer), encoder, encoder
     return preds, q
 
 
