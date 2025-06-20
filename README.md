@@ -10,6 +10,12 @@ See the diagram below for some guidance on how to use and set-up the code to wor
 - [How to load environments in Anaconda](https://conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html#creating-an-environment-from-an-environment-yml-file)
 - [How to install CUDA](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html)
 
+To recreate the Python environment on Linux run:
+
+```bash
+conda env create -f environment.yml
+```
+
 ## Hierarchy of the files and functions
 There is a lot custom functionality built-in to the code. Therefore we have some overview of the different functions that we wrote, what files they originate from, and where they are used. All custom functions that are used in main.py have built-in documentation that you can refer to if things are unclear.
 
