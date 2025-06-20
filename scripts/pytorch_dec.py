@@ -106,7 +106,6 @@ def train_dec(data: np.ndarray, n_clusters: int, hidden_dim: int = 64,
     final_pred = q.argmax(dim=1).cpu().numpy()
     return final_pred, z.cpu().numpy(), model, dec_layer
 
-
 def save_dec_model(model: AutoEncoder, dec_layer: DECLayer, path: str) -> None:
     """Save a DEC autoencoder and clustering layer."""
     torch.save(
