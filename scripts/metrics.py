@@ -1,87 +1,39 @@
-"""
-File containing metrics for DEC clusterin, as implemented by 
-https://github.com/Tony607/Keras_Deep_Clustering
-"""
+"""Metrics utilities for clustering models using PyTorch."""
 
 import numpy as np
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
-import keras.backend as K
-
-# from sklearn.utils.linear_assignment_ import linear_assignment is deprecated
-# Thus, is replaced by:
 from scipy.optimize import linear_sum_assignment as linear_assignment
 
 
-# compute sensitivity, can be used in Keras evaluation
 def sensitivity(y_true, y_pred):
-    """
-
-    Parameters
-    ----------
-    y_true :
-    y_pred :
-
-    Returns
-    -------
-
-    """
-    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
-    return true_positives / (possible_positives + K.epsilon())
+    """Compute sensitivity."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    true_pos = np.sum(np.round(np.clip(y_true * y_pred, 0, 1)))
+    possible_pos = np.sum(np.round(np.clip(y_true, 0, 1)))
+    return true_pos / (possible_pos + np.finfo(float).eps)
 
 
-# compute specificity, can be used in Keras evaluation
 def specificity(y_true, y_pred):
-    """
-
-    Parameters
-    ----------
-    y_true :
-    y_pred :
-
-    Returns
-    -------
-
-    """
-    true_negatives = K.sum(K.round(K.clip((1 - y_true) * (1 - y_pred), 0, 1)))
-    possible_negatives = K.sum(K.round(K.clip(1 - y_true, 0, 1)))
-    return true_negatives / (possible_negatives + K.epsilon())
+    """Compute specificity."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    true_neg = np.sum(np.round(np.clip((1 - y_true) * (1 - y_pred), 0, 1)))
+    possible_neg = np.sum(np.round(np.clip(1 - y_true, 0, 1)))
+    return true_neg / (possible_neg + np.finfo(float).eps)
 
 
 def calculate_metrics(loss, y, y_pred):
-    """
-
-    Parameters
-    ----------
-    loss :
-    y :
-    y_pred :
-
-    Returns
-    -------
-
-    """
-    nmi = normalized_mutual_info_score
-    ari = adjusted_rand_score
+    """Calculate standard clustering metrics."""
     acc = np.round(accuracy(y_true=y, y_pred=y_pred), 5)
-    nmi = np.round(nmi(y, y_pred), 5)
-    ari = np.round(ari(y, y_pred), 5)
+    nmi = np.round(normalized_mutual_info_score(y, y_pred), 5)
+    ari = np.round(adjusted_rand_score(y, y_pred), 5)
     loss = np.round(loss, 5)
     return acc, ari, loss, nmi
 
 
 def accuracy(y_true, y_pred):
-    """
-    Calculate clustering accuracy
-    Parameters
-    ----------
-    y_true : true labels, numpy.array with shape `(n_samples,)`
-    y_pred : predicted labels, numpy.array with shape `(n_samples,)`
-
-    Returns
-    -------
-    accuracy: array with shape [0,1]
-    """
+    """Clustering accuracy using the Hungarian algorithm."""
     y_true = y_true.astype(np.int64)
     assert y_pred.size == y_true.size
     D = max(y_pred.max(), y_true.max()) + 1
@@ -89,4 +41,4 @@ def accuracy(y_true, y_pred):
     for i in range(y_pred.size):
         w[y_pred[i], y_true[i]] += 1
     ind = linear_assignment(w.max() - w)
-    return sum([w[i, j] for i, j in ind]) * 1.0 / y_pred.size
+    return sum(w[i, j] for i, j in zip(*ind)) * 1.0 / y_pred.size

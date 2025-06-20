@@ -1,360 +1,203 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Oct 27 14:25:04 2022
+"""PyTorch implementation of the X-shaped variational autoencoder used for X-DEC."""
 
-@author: Jip de Kok
-
-Credits for this code go to the original authors of the cancerAI
-integrativeVAEs Github repository
-(https://github.com/CancerAI-CL/IntegrativeVAEs)
-"""
-
-from keras import regularizers
-from keras.layers import Dense
-from keras.layers import Input
-from keras.models import Model, clone_model
-from tensorflow.keras.optimizers import SGD
-from sklearn.cluster import KMeans
-from sklearn.model_selection import RepeatedKFold
-from metrics import calculate_metrics
-import pickle
-import hdbscan
-import time
-
-import argparse
 import os
-import tensorflow as tf
-import random
-from keras import backend as K
-from tensorflow.keras import optimizers
-from keras.layers import BatchNormalization as BN, Concatenate, Dense, Input, Lambda,Dropout
-from keras.models import Model
-
-from scripts.common import sse, bce, mmd, sampling, kl_regu
-from keras.losses import mean_squared_error,binary_crossentropy
 import numpy as np
 import pandas as pd
-from tensorflow.random import set_seed
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
-set_seed(5192)
-os.environ['PYTHONHASHSEED'] = str(5192)
-np.random.seed(5192)
-random.seed(5192)
-os.environ['TF_DETERMINISTIC_OPS'] = '1'
+from scripts.common import sse, bce, mmd, sampling, kl_regu
 
 
-class xvae():
-    # SET 1 SHOULD ALWAYS BE NUMERICAL AND SET 2 BINARY (CATEGORICAL)
-    
-    def __init__(self, s1_input_size, s2_input_size, ds1 = 48, ds2 = None,
-                 ds12 = None, ls = 32, weighted = True,
-                 act = "elu", dropout = 0.2, distance = "kl", beta = 25,
-                 epochs = 250, bs = 64, save_model = False):
-        
-        '''
-        
-        Parameters
-        ----------
-        s1_input_size : integer
-            Number of features in first data set.
-        s2_input_size : integer
-            Number of features in second data set.
-        ds1 : integer
-            The intermediate dense layers size. if ds2 and ds12 are no
-            specified, all dense layers will be size of ds1. Otherwise,
-            Only the first dense layer of data set 1 will be set to ds1
-        ds2 : integer, optional
-            The first intermediate dense layer size of the of the
-            second data set. If None, will be set to ds1. The default is None.
-        ds12 : integer, optional
-            The second intermediate dense layer size that combines the first
-            and second data set. If None, will be set to ds1. The default is None.
-        ls : TYPE
-            latent dimension size
-        act : TYPE
-            activation function
-            DESCRIPTION. The default is "elu".
-        dropout : TYPE, optional
-            DESCRIPTION. The default is 0.2.
-        distance : TYPE, optional
-            DESCRIPTION. The default is "kl".
-        beta : TYPE, optional
-            DESCRIPTION. The default is 25.
-        epochs : TYPE, optional
-            DESCRIPTION. The default is 250.
-        bs : TYPE, optional
-            DESCRIPTION. The default is 64.
-        save_model : TYPE, optional
-            DESCRIPTION. The default is False.
-
-        Returns
-        -------
-        None.
-
-        '''
-        
-        # Initiate components of class object
-        self.args = argparse.ArgumentParser()
-        self.vae = None
-        self.encoder = None
-        
-        # Fil args component of class object
-        self.args.s1_input_size = s1_input_size
-        self.args.s2_input_size = s2_input_size
-        self.args.ds1 = ds1
-        if ds2 == None:
-            self.args.ds2 = ds1
-        else:
-            self.args.ds2 = ds2
-        if ds12 == None:
-            self.args.ds12 = ds1
-        else:
-            self.args.ds12 = ds12
-        self.args.ls = ls
-        self.args.act = act
-        self.args.dropout = dropout
-        self.args.distance = distance
-        self.args.beta = beta
-        self.args.epochs = epochs
-        self.args.bs = bs
-        self.args.weighted = weighted
-        self.args.save_model = save_model
-        
-        
-    def build_model(self):
-        tf.random.set_seed(5192)
-        os.environ['PYTHONHASHSEED'] = str(5192)
-        np.random.seed(5192)
-        random.seed(5192)
-        os.environ['TF_DETERMINISTIC_OPS'] = '1'
-
-        # Build the encoder network
-        # ------------ Input -----------------
-        s1_inp = Input(shape=(self.args.s1_input_size,))
-        s2_inp = Input(shape=(self.args.s2_input_size,))
-        inputs = [s1_inp, s2_inp]
-        
+def _get_activation(name):
+    name = name.lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "tanh":
+        return nn.Tanh()
+    return nn.ELU()
 
 
-        # ------------ Concat Layer -----------------
-        # First hidden layer for set1
-        x1 = Dense(self.args.ds1, activation=self.args.act)(s1_inp)
-        x1 = BN()(x1)
+class xvae(nn.Module):
+    """X-VAE integrating two data modalities."""
 
-        # First hidden layer for set2
-        x2 = Dense(self.args.ds2, activation=self.args.act)(s2_inp)
-        x2 = BN()(x2)
-        
-        # Combine first two hidden layers
-        x = Concatenate(axis=-1)([x1, x2])
+    def __init__(
+        self,
+        s1_input_size,
+        s2_input_size,
+        ds1=48,
+        ds2=None,
+        ds12=None,
+        ls=32,
+        weighted=True,
+        act="elu",
+        dropout=0.2,
+        distance="kl",
+        beta=25,
+        epochs=250,
+        bs=64,
+        save_model=False,
+        device="cpu",
+    ):
+        super().__init__()
+        self.device = device
+        self.s1_input_size = s1_input_size
+        self.s2_input_size = s2_input_size
+        self.ds1 = ds1
+        self.ds2 = ds2 if ds2 is not None else ds1
+        self.ds12 = ds12 if ds12 is not None else ds1
+        self.ls = ls
+        self.weighted = weighted
+        self.act_fn = _get_activation(act)
+        self.dropout_rate = dropout
+        self.distance = distance
+        self.beta = beta
+        self.epochs = epochs
+        self.bs = bs
+        self.save_model_flag = save_model
 
-        # Second hidden layers with first two hidden layers as input
-        x = Dense(self.args.ds12, activation=self.args.act)(x)
-        x = BN()(x)
+        # Encoder
+        self.enc_fc1_s1 = nn.Linear(s1_input_size, self.ds1)
+        self.enc_bn1_s1 = nn.BatchNorm1d(self.ds1)
+        self.enc_fc1_s2 = nn.Linear(s2_input_size, self.ds2)
+        self.enc_bn1_s2 = nn.BatchNorm1d(self.ds2)
+        self.enc_fc2 = nn.Linear(self.ds1 + self.ds2, self.ds12)
+        self.enc_bn2 = nn.BatchNorm1d(self.ds12)
+        self.z_mean = nn.Linear(self.ds12, self.ls)
+        self.z_log_sigma = nn.Linear(self.ds12, self.ls)
 
-        # ------------ Embedding Layer --------------
-        # Encoding layer
-        z_mean = Dense(self.args.ls, name='z_mean')(x)
-        z_log_sigma = Dense(self.args.ls, name='z_log_sigma', kernel_initializer='zeros')(x)
-        z = Lambda(sampling, output_shape=(self.args.ls,),
-                   name='z')([z_mean, z_log_sigma])
+        # Decoder
+        self.dec_fc = nn.Linear(self.ls, self.ds12)
+        self.dec_bn = nn.BatchNorm1d(self.ds12)
+        self.dec_fc_s1 = nn.Linear(self.ds12, self.ds1)
+        self.dec_bn_s1 = nn.BatchNorm1d(self.ds1)
+        self.dec_fc_s2 = nn.Linear(self.ds12, self.ds2)
+        self.dec_bn_s2 = nn.BatchNorm1d(self.ds2)
+        self.out_s1 = nn.Linear(self.ds1, s1_input_size)
+        self.out_s2 = nn.Linear(self.ds2, s2_input_size)
+        self.dropout = nn.Dropout(self.dropout_rate)
 
-        self.encoder = Model(inputs, [z_mean, z_log_sigma, z], name='encoder')
-        self.Z_encoder = Model(inputs, z_mean, name='Z_encoder')
-        self.encoder.summary()
+        self.to(self.device)
 
-        # Build the decoder network
-        # ------------ Dense out -----------------
-        latent_inputs = Input(shape=(self.args.ls,), name='z_sampling')
-        x = latent_inputs
-        x = Dense(self.args.ds12, activation=self.args.act)(x)
-        x = BN()(x)
-        
-        x=Dropout(self.args.dropout)(x)
-        # ------------ Dense branches ------------
-        x1 = Dense(self.args.ds1, activation=self.args.act)(x)
-        x1 = BN()(x1)
-        x2 = Dense(self.args.ds2, activation=self.args.act)(x)
-        x2 = BN()(x2)
+    # ------------------------------------------------------------------
+    # Model components
+    def encode(self, s1, s2):
+        x1 = self.act_fn(self.enc_bn1_s1(self.enc_fc1_s1(s1)))
+        x2 = self.act_fn(self.enc_bn1_s2(self.enc_fc1_s2(s2)))
+        x = torch.cat([x1, x2], dim=1)
+        x = self.act_fn(self.enc_bn2(self.enc_fc2(x)))
+        mean = self.z_mean(x)
+        log_sigma = self.z_log_sigma(x)
+        return mean, log_sigma
 
-        # ------------ Out -----------------------
-        s1_out = Dense(self.args.s1_input_size, activation='linear')(x1) # Manual change here
-        s2_out = Dense(self.args.s2_input_size, activation='sigmoid')(x2) # Manual change here
+    def decode(self, z):
+        x = self.act_fn(self.dec_bn(self.dec_fc(z)))
+        x = self.dropout(x)
+        x1 = self.act_fn(self.dec_bn_s1(self.dec_fc_s1(x)))
+        x2 = self.act_fn(self.dec_bn_s2(self.dec_fc_s2(x)))
+        s1_out = self.out_s1(x1)
+        s2_out = torch.sigmoid(self.out_s2(x2))
+        return s1_out, s2_out
 
-        decoder = Model(latent_inputs, [s1_out, s2_out], name='decoder')
-        decoder.summary()
-        
-        outputs = decoder(self.encoder(inputs)[2])
-        self.decoder = decoder
-        self.vae = Model(inputs, outputs, name='vae_x')
+    def forward(self, s1, s2):
+        mean, log_sigma = self.encode(s1, s2)
+        z = sampling((mean, log_sigma))
+        s1_out, s2_out = self.decode(z)
+        return s1_out, s2_out, mean, log_sigma, z
 
-        if self.args.distance == "mmd":
-            true_samples = K.random_normal(K.stack([self.args.bs, self.args.ls]))
-            distance = mmd(true_samples, z)
-        elif self.args.distance == "kl":
-            distance = kl_regu(z_mean,z_log_sigma)
-        else:
-            raise ValueError(f"{self.distance} not recognised as distance.")
-        
-        if self.args.weighted:
-            s1_loss = mean_squared_error(inputs[0], outputs[0]) * self.args.s1_input_size # Manual change here
-            s2_loss = binary_crossentropy(inputs[1], outputs[1]) * self.args.s2_input_size # Manual change here
-        else:
-            s1_loss = mean_squared_error(inputs[0], outputs[0]) # Manual change here
-            s2_loss = binary_crossentropy(inputs[1], outputs[1]) # Manual change here
-        
-        
-        self.s1_loss = s1_loss
-        self.s2_loss = s2_loss
-        
-        if self.args.weighted:
-            reconstruction_loss = (s1_loss+s2_loss)/(self.args.s1_input_size + self.args.s2_input_size)
-        else:
-            reconstruction_loss = s1_loss+s2_loss
-            
-        vae_loss = K.mean(reconstruction_loss + self.args.beta * distance)
-        self.vae.add_loss(vae_loss)
-        
-        adam = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999,
-                               epsilon=None, amsgrad=False, decay=0.001)
-        self.vae.compile(optimizer=adam,
-                         metrics=[binary_crossentropy])
-        
-        self.input = inputs
-        self.output = z_mean
-        
-        self.reconstruction = outputs
+    # ------------------------------------------------------------------
+    def fit(self, s1_train, s2_train, s1_val=None, s2_val=None):
+        dataset = TensorDataset(
+            torch.tensor(s1_train, dtype=torch.float32),
+            torch.tensor(s2_train, dtype=torch.float32),
+        )
+        loader = DataLoader(dataset, batch_size=self.bs, shuffle=True)
 
-        
-        self.vae.summary()
-        
-        
-    def train(self, s1_train, s2_train, s1_test, s2_test):
-        tf.random.set_seed(5192)
-        os.environ['PYTHONHASHSEED'] = str(5192)
-        np.random.seed(5192)
-        random.seed(5192)
-        os.environ['TF_DETERMINISTIC_OPS'] = '1'
-        
-        self.vae.fit([s1_train, s2_train], epochs=self.args.epochs,
-                     batch_size=self.args.bs, shuffle=True,
-                     validation_data=([s1_test, s2_test], None))
-        if self.args.save_model:
+        optim = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-3)
+        self.train()
+        for _ in range(self.epochs):
+            for b1, b2 in loader:
+                b1 = b1.to(self.device)
+                b2 = b2.to(self.device)
+                optim.zero_grad()
+                s1_out, s2_out, mean, log_sigma, z = self.forward(b1, b2)
+                if self.weighted:
+                    l1 = sse(b1, s1_out) * self.s1_input_size
+                    l2 = bce(b2, s2_out) * self.s2_input_size
+                else:
+                    l1 = sse(b1, s1_out)
+                    l2 = bce(b2, s2_out)
+                rec = l1 + l2
+                if self.weighted:
+                    rec = rec / (self.s1_input_size + self.s2_input_size)
+                if self.distance == "mmd":
+                    prior = torch.randn_like(z)
+                    dist = mmd(prior, z)
+                else:
+                    dist = kl_regu(mean, log_sigma)
+                loss = torch.mean(rec + self.beta * dist)
+                loss.backward()
+                optim.step()
+
+        if self.save_model_flag:
             self.save_model()
 
-    def predict(self, s1_data, s2_data, output = 'encoder'):
-        '''
-        runs the trained xvae on new data to encode or reproduce the data.
+    def predict(self, s1_data, s2_data, output="encoder"):
+        self.eval()
+        with torch.no_grad():
+            s1 = torch.tensor(s1_data, dtype=torch.float32, device=self.device)
+            s2 = torch.tensor(s2_data, dtype=torch.float32, device=self.device)
+            s1_out, s2_out, mean, log_sigma, _ = self.forward(s1, s2)
+            if output == "encoder":
+                return mean.cpu().numpy()
+            return (s1_out.cpu().numpy(), s2_out.cpu().numpy())
 
-        Parameters
-        ----------
-        s1_data : ndarray
-            2-dimensional array of the first input set. Rows are samples and
-            columns are variables.
-        s2_data : ndarray
-            2-dimensional array of the second input set. Rows are samples and
-            columns are variables.
-        output : str, optional
-            String specifying what output to return. Can be set to "encoder" to
-            only run the encoder, and return the latent feautures. Or to
-            "decoder" to run the entire xvae and return recreated input
-            variables. The default is 'encoder'.
+    # ------------------------------------------------------------------
+    def save_model(self, path="xvae_model", force_path=True):
+        if force_path and not os.path.exists(path):
+            os.makedirs(path)
+        torch.save({"state_dict": self.state_dict(), "params": self._save_params()}, os.path.join(path, "model.pt"))
 
-        Returns
-        -------
-        ndarray
-            2-dimensional array of the encoded latent features or recreated
-            input variables, depending on what output is requested. Rows are
-            samples and columns are variables.
-
-        '''
-        tf.random.set_seed(5192)
-        os.environ['PYTHONHASHSEED'] = str(5192)
-        np.random.seed(5192)
-        random.seed(5192)
-        os.environ['TF_DETERMINISTIC_OPS'] = '1'
-        
-        if output =="encoder":
-            return self.encoder.predict([s1_data, s2_data],
-                                        batch_size=self.args.bs)[0]
-        elif output =="decoder":
-            return self.decoder.predict(self.encoder.predict(
-                [s1_data, s2_data], batch_size=self.args.bs)[0])
-    
-    def save_model(self, path = "xvae_model", force_path = True):
-        '''
-        Locally save xvae encoder
-
-        Parameters
-        ----------
-        path : str, optional
-            Directory where the  xvae model should be stored locally. The
-            default is "xvae_model".
-        force_path : boolean, optional
-            Inidicates whether the directory should be created if non-existent.
-            The default is True.
-
-        Returns
-        -------
-        None.
-
-        '''
-        
-        # Create directory if non-existent
-        if force_path:
-            if not os.path.exists(path):
-                os.makedirs(path)
-            
-        # Save model architecture
-        architecture = pd.DataFrame(index = ["s1_input_size", "s2_input_size",
-                                             "ds1", "ds2", "ds12", "ls",
-                                             "weighted", "act" , "dropout",
-                                             "distance", "beta", "epochs",
-                                             "bs", "save_model"],
-                                    columns = ["value"])
-        for i in architecture.index:
-            architecture.loc[i,"value"] = getattr(self.args, i)
-        architecture.to_csv(f"{path}/model_architecture.csv")
-        
-        # Save model weights
-        self.vae.save_weights(f"{path}/model_weights")
-        
-        return
+    def _save_params(self):
+        return {
+            "s1_input_size": self.s1_input_size,
+            "s2_input_size": self.s2_input_size,
+            "ds1": self.ds1,
+            "ds2": self.ds2,
+            "ds12": self.ds12,
+            "ls": self.ls,
+            "weighted": self.weighted,
+            "act": type(self.act_fn).__name__,
+            "dropout": self.dropout_rate,
+            "distance": self.distance,
+            "beta": self.beta,
+            "epochs": self.epochs,
+            "bs": self.bs,
+        }
 
 
-def load_xvae_model(path):
-    '''
-    Load a saved xvae encoder.
-
-    Parameters
-    ----------
-    path : str
-        Directory where the saved xvae model is located.
-
-    Returns
-    -------
-    model : xvae
-        xvae encoder.
-
-    '''
-    # Load model architecture
-    architecture = pd.read_csv(f"{path}/model_architecture.csv", index_col = 0)
-    
-    # Initiate xvae with appropriate architecture
-    model = xvae(s1_input_size = int(architecture.loc["s1_input_size","value"]),
-                 s2_input_size = int(architecture.loc["s2_input_size","value"]),
-                 beta = int(architecture.loc["beta","value"]),
-                 ds1 = int(architecture.loc["ds1","value"]),
-                 ds2 = int(architecture.loc["ds2","value"]),
-                 ds12 = int(architecture.loc["ds12","value"]),
-                 ls = int(architecture.loc["ls","value"]),
-                 dropout=float(architecture.loc["dropout","value"]),
-                 bs = int(architecture.loc["bs","value"]),
-                 distance = architecture.loc["distance","value"])
-
-    model.build_model()
-    
-    # Load and apply model weights
-    model.vae.load_weights(f"{path}/model_weights")
-    
+def load_xvae_model(path, device="cpu"):
+    chk = torch.load(os.path.join(path, "model.pt"), map_location=device)
+    params = chk["params"]
+    act_map = {"ReLU": "relu", "Tanh": "tanh", "ELU": "elu"}
+    act = act_map.get(params.get("act", "ELU"), "elu")
+    model = xvae(
+        params["s1_input_size"],
+        params["s2_input_size"],
+        ds1=params["ds1"],
+        ds2=params["ds2"],
+        ds12=params["ds12"],
+        ls=params["ls"],
+        weighted=params["weighted"],
+        act=act,
+        dropout=params["dropout"],
+        distance=params["distance"],
+        beta=params["beta"],
+        epochs=params["epochs"],
+        bs=params["bs"],
+        device=device,
+    )
+    model.load_state_dict(chk["state_dict"])
+    model.to(device)
     return model
