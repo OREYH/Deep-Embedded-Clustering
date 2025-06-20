@@ -305,3 +305,4 @@ dependencies:
       - tensorflow-io-gcs-filesystem==0.24.0
       - termcolor==1.1.0
       - tf-estimator-nightly==2.8.0.dev2021122109
+      - pytorch>=2.0

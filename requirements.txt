@@ -1,3 +1,4 @@
+torch>=2.0
 absl-py==1.0.0
 adjustText==0.7.3
 alabaster @ file:///home/ktietz/src/ci/alabaster_1611921544520/work
